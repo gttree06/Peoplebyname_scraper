@@ -32,7 +32,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 
 SEARCH_URL      = "https://www.peoplebyname.com/people/{last}/{first}/"
-OPTOUT_URL      = "https://www.peoplebyname.com/opt_out.php"
+OPTOUT_URL      = "https://www.peoplebyname.com/remove.php"
 PAGE_DELAY      = 2      # seconds between page loads
 SHOW_BROWSER    = True   # False = headless (no visible window)
 MATCH_THRESHOLD = 5      # minimum score to consider a record a match
@@ -277,23 +277,47 @@ def find_matching_record_ids(driver: webdriver.Chrome, user: dict) -> list:
     seen = set()
 
     # Find all elements whose text contains "Record ID:" then walk up to card container
-    card_candidates = driver.find_elements(
-        By.XPATH,
-        "//*[contains(text(), 'Record ID:')]"
-        "/ancestor::*[self::div or self::td or self::li][1]"
+    # From devtools: Record ID is in <div class="background_chk1"> inside a <li>
+    # The full card (<li>) contains: Record ID div, name <b>, address text, phone
+    # Strategy: find all <li> elements that contain a "background_chk1" div
+    card_lis = driver.find_elements(
+        By.XPATH, "//li[.//div[contains(@class,'background_chk')]]"
     )
 
-    # Fallback: grab the label elements themselves
-    if not card_candidates:
+    # Fallback: find by Record ID text and walk up to <li>
+    if not card_lis:
+        card_lis = driver.find_elements(
+            By.XPATH, "//*[contains(text(),'Record ID:')]/ancestor::li[1]"
+        )
+
+    # Last fallback: find the label divs and use JS to get parent li text
+    use_js_fallback = not card_lis
+
+    if use_js_fallback:
         card_candidates = driver.find_elements(
             By.XPATH, "//*[contains(text(), 'Record ID:')]"
         )
+    else:
+        card_candidates = card_lis
 
     print(f"   Found {len(card_candidates)} card(s) on page.")
 
-    for card in card_candidates:
-        card_text = card.text
-        id_match  = re.search(r"Record\s+ID[:\s]+(\d+)", card_text, re.IGNORECASE)
+    for card_el in card_candidates:
+        if use_js_fallback:
+            # Walk up to <li> via JS
+            card_text = driver.execute_script("""
+                var el = arguments[0];
+                for (var i = 0; i < 10; i++) {
+                    if (!el.parentElement) break;
+                    el = el.parentElement;
+                    if (el.tagName === 'LI') return (el.innerText || '').trim();
+                }
+                return (el.innerText || '').trim();
+            """, card_el)
+        else:
+            card_text = card_el.text or card_el.get_attribute("innerText") or ""
+
+        id_match = re.search(r"Record\s+ID[:\s]+(\d+)", card_text, re.IGNORECASE)
         if not id_match:
             continue
 
@@ -303,12 +327,12 @@ def find_matching_record_ids(driver: webdriver.Chrome, user: dict) -> list:
         seen.add(record_id)
 
         s = score_record(card_text, user, addr_tokens)
-        preview = card_text.replace("\n", " ")[:90]
+        preview = card_text.replace("\n", " ")[:100]
         print(f"   ID {record_id} | score={s} | {preview!r}")
 
         if s >= MATCH_THRESHOLD:
             matching_ids.append(record_id)
-            print(f"   ✔  Matched!")
+            print(f"   Matched!")
 
     # Diagnostic dump if nothing found at all
     if not seen:
