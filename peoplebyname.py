@@ -32,7 +32,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 
 SEARCH_URL      = "https://www.peoplebyname.com/people/{last}/{first}/"
-OPTOUT_URL      = "https://www.peoplebyname.com/remove.php"
+OPTOUT_URL      = "https://www.peoplebyname.com/opt_out.php"
 PAGE_DELAY      = 2      # seconds between page loads
 SHOW_BROWSER    = True   # False = headless (no visible window)
 MATCH_THRESHOLD = 5      # minimum score to consider a record a match
@@ -206,19 +206,22 @@ def build_address_tokens(addresses: list) -> list:
     return list(tokens)
 
 
-def score_record(card_text: str, user: dict, addr_tokens: list) -> int:
+def score_record(card_text: str, user: dict, addr_tokens: list) -> tuple:
     """
     Score a record card against user data.
-    Higher score = better match.
+    Returns (score, addr_matched) where addr_matched is True only if at least
+    one address token was found in the card. A card is only collected if BOTH
+    the name matches AND addr_matched is True.
 
     Scoring:
       +10  full name found in card
       +5   exact age match
-      +2   age ±1
+      +2   age +-1
       +4   full address part (street, city, or zip section) matched
       +2   individual address word or bigram matched
     """
     score = 0
+    addr_matched = False
     text  = normalize(card_text)
     full_name = normalize(f"{user['first_name']} {user['last_name']}")
 
@@ -234,11 +237,12 @@ def score_record(card_text: str, user: dict, addr_tokens: list) -> int:
 
     for token in addr_tokens:
         if token in text:
+            addr_matched = True
             # Longer tokens (full street / city sections) score higher
             bonus = 4 if len(token) > 8 else 2
             score += bonus
 
-    return score
+    return score, addr_matched
 
 
 # ─────────────────────────────────────────────
@@ -326,13 +330,15 @@ def find_matching_record_ids(driver: webdriver.Chrome, user: dict) -> list:
             continue
         seen.add(record_id)
 
-        s = score_record(card_text, user, addr_tokens)
+        s, addr_matched = score_record(card_text, user, addr_tokens)
         preview = card_text.replace("\n", " ")[:100]
-        print(f"   ID {record_id} | score={s} | {preview!r}")
+        print(f"   ID {record_id} | score={s} | addr={addr_matched} | {preview!r}")
 
-        if s >= MATCH_THRESHOLD:
+        if s >= MATCH_THRESHOLD and addr_matched:
             matching_ids.append(record_id)
             print(f"   Matched!")
+        elif s >= MATCH_THRESHOLD and not addr_matched:
+            print(f"   Skipped (name matched but no address match)")
 
     # Diagnostic dump if nothing found at all
     if not seen:
